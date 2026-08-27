@@ -153,6 +153,25 @@ export function SettingsForm(props: IProps) {
       </div>
       <div
         class={styles.settings__row}
+        title="Delays showing the popup. Releasing the modifier before this delay switches tabs without rendering the popup"
+      >
+        <label for="popupShowDelay" class={styles.settings__label}>
+          <i class={styles.iconInLabel}>hourglass_empty</i>
+          Popup show delay
+        </label>
+        <MNumberInput
+          id="popupShowDelay"
+          suffix="ms"
+          min={0}
+          max={1000}
+          value={props.store.settings.popupShowDelay}
+          onInput={(value) => {
+            props.setSettingsOptions({popupShowDelay: value})
+          }}
+        />
+      </div>
+      <div
+        class={styles.settings__row}
         title="If a tab title is wider than the popup then its overflowing part will be hidden. When such a tab is selected its text will be scrolled. This option delays the start of the scrolling"
       >
         <label for="textScrollDelay" class={styles.settings__label}>
