@@ -21,19 +21,37 @@ interface IProps {
   element: HTMLElement
 }
 
+interface IPendingPopup {
+  completion: Promise<void>
+  increment: number
+  isModelReady: boolean
+  modifierWasReleased: boolean
+  resolve: () => void
+  startedAt: number
+}
+
 let testHelper: undefined | PopupTestHelper
 if (E2E) {
   testHelper = new PopupTestHelper()
 }
 
 export function Popup({element}: IProps) {
-  const {store, syncStoreWithBackground, openPopup, closePopup, selectNextTab} = createPopupStore()
+  const {
+    store,
+    syncStoreWithBackground,
+    openPopup,
+    closePopup: closePopupInStore,
+    selectNextTab,
+  } = createPopupStore()
   // Prevents auto switching when the popup is opened.
   let isSettingsDemo = false
   // Stores the last active element before the popup was opened.
   const selectionAndFocus = new SelectionAndFocus()
   let cleanUpListeners = () => {}
   let disposeAutoSwitchingTimeout: () => void = () => {}
+  let pendingPopup: IPendingPopup | undefined
+  let pendingBlurTimeout: number | undefined
+  let popupShowTimeout: number | undefined
 
   onMount(() => {
     log(`[start switcher]`)
@@ -44,7 +62,9 @@ export function Popup({element}: IProps) {
   onCleanup(() => {
     log(`[stop switcher]`)
     cleanUpListeners()
-    disposeAutoSwitchingTimeout()
+    cancelPendingPopup()
+    cancelPendingBlurCheck()
+    cancelAutoSwitchingTimeout()
     chrome.runtime.sendMessage(contentScriptStopped())
   })
 
@@ -61,9 +81,9 @@ export function Popup({element}: IProps) {
   })
 
   return (
-    <>
+    <Show when={store.isOpen}>
       <style>{styles}</style>
-      <Show when={store.isOpen}>
+      <>
         <div class="overlay">
           <div class="card" classList={{card_dark: store.settings.isDarkTheme}} data-test="card">
             <For each={store.tabs}>
@@ -84,8 +104,8 @@ export function Popup({element}: IProps) {
             </For>
           </div>
         </div>
-      </Show>
-    </>
+      </>
+    </Show>
   )
 
   // NOTE:
@@ -154,6 +174,121 @@ export function Popup({element}: IProps) {
     closePopup()
   }
 
+  function switchToSelectedTab() {
+    const selectedTab = store.tabs[store.selectedTabIndex]
+    if (selectedTab) {
+      switchTo(selectedTab)
+    } else {
+      closePopup()
+    }
+  }
+
+  function closePopup() {
+    cancelPendingBlurCheck()
+    cancelPendingPopup()
+    cancelAutoSwitchingTimeout()
+    closePopupInStore()
+  }
+
+  function cancelPopupShowTimeout() {
+    if (popupShowTimeout !== undefined) {
+      window.clearTimeout(popupShowTimeout)
+      popupShowTimeout = undefined
+    }
+  }
+
+  function cancelPendingPopup() {
+    cancelPopupShowTimeout()
+    const pending = pendingPopup
+    pendingPopup = undefined
+    pending?.resolve()
+  }
+
+  function cancelPendingBlurCheck() {
+    if (pendingBlurTimeout !== undefined) {
+      window.clearTimeout(pendingBlurTimeout)
+      pendingBlurTimeout = undefined
+    }
+  }
+
+  function cancelAutoSwitchingTimeout() {
+    disposeAutoSwitchingTimeout()
+    disposeAutoSwitchingTimeout = () => {}
+  }
+
+  function startAutoSwitchingTimeout() {
+    if (document.hasFocus()) {
+      return
+    }
+    cancelAutoSwitchingTimeout()
+    const timeout = window.setTimeout(() => {
+      switchToSelectedTab()
+    }, store.settings.autoSwitchingTimeout)
+    disposeAutoSwitchingTimeout = () => {
+      window.clearTimeout(timeout)
+    }
+  }
+
+  function showPendingPopup(pending: IPendingPopup) {
+    if (pendingPopup !== pending || pending.modifierWasReleased) {
+      return
+    }
+    pendingPopup = undefined
+    openPopup()
+    startAutoSwitchingTimeout()
+    pending.resolve()
+  }
+
+  async function startPendingPopup(increment: number) {
+    let resolveCompletion: (() => void) | undefined
+    const completion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve
+    })
+    const pending: IPendingPopup = {
+      completion,
+      increment,
+      isModelReady: false,
+      modifierWasReleased: false,
+      resolve: () => resolveCompletion?.(),
+      startedAt: performance.now(),
+    }
+    pendingPopup = pending
+
+    try {
+      await syncStoreWithBackground()
+    } catch (error) {
+      if (pendingPopup === pending) {
+        cancelPendingPopup()
+      }
+      log('[Popup show delay] Could not load popup model.', error)
+      return
+    }
+
+    if (pendingPopup !== pending) {
+      return
+    }
+    pending.isModelReady = true
+    selectNextTab(pending.increment)
+
+    if (pending.modifierWasReleased) {
+      switchToSelectedTab()
+      return
+    }
+
+    const elapsed = performance.now() - pending.startedAt
+    const remainingDelay = Math.max(0, store.settings.popupShowDelay - elapsed)
+    if (remainingDelay === 0) {
+      showPendingPopup(pending)
+      return
+    }
+
+    popupShowTimeout = window.setTimeout(() => {
+      popupShowTimeout = undefined
+      showPendingPopup(pending)
+    }, remainingDelay)
+    await pending.completion
+  }
+
   function setUpListeners() {
     element.addEventListener('click', onOverlayClick, {capture: true})
     window.addEventListener('keyup', onKeyUp, {capture: true})
@@ -164,29 +299,36 @@ export function Popup({element}: IProps) {
     const messageListener = handleMessage({
       [Message.DEMO_SETTINGS]: async () => {
         isSettingsDemo = true
+        cancelPendingBlurCheck()
+        cancelPendingPopup()
         await syncStoreWithBackground()
         openPopup()
       },
       [Message.CLOSE_POPUP]: closePopup,
       [Message.SELECT_TAB]: async ({increment}) => {
-        await syncStoreWithBackground()
-        openPopup()
-        selectNextTab(increment)
-        // When the focus is on the address bar or the 'search in the page' field
-        // then the extension should switch a tab at the end of a timer.
-        // Because there is no way to handle key pressings when a page has no focus.
-        // https://stackoverflow.com/a/20940788/3167855
-        if (!document.hasFocus()) {
-          disposeAutoSwitchingTimeout()
-
-          const timeout = window.setTimeout(() => {
-            switchTo(store.tabs[store.selectedTabIndex])
-          }, store.settings.autoSwitchingTimeout)
-
-          disposeAutoSwitchingTimeout = () => {
-            window.clearTimeout(timeout)
+        if (store.isOpen) {
+          await syncStoreWithBackground()
+          if (!store.isOpen) {
+            return
           }
+          selectNextTab(increment)
+          // When the focus is on the address bar or the 'search in the page' field
+          // then the extension should switch a tab at the end of a timer.
+          // Because there is no way to handle key pressings when a page has no focus.
+          // https://stackoverflow.com/a/20940788/3167855
+          startAutoSwitchingTimeout()
+          return
         }
+
+        if (pendingPopup) {
+          pendingPopup.increment += increment
+          if (pendingPopup.isModelReady) {
+            selectNextTab(increment)
+          }
+          return
+        }
+
+        await startPendingPopup(increment)
       },
     })
     chrome.runtime.onMessage.addListener(messageListener)
@@ -232,11 +374,24 @@ export function Popup({element}: IProps) {
 
   function onKeyUp(event: KeyboardEvent): void {
     log(`[onKeyUp event]`, event)
-    if (!store.isOpen || store.settings.isStayingOpen) {
+    if (!['Alt', 'Control', 'Meta'].includes(event.key)) {
       return
     }
-    if (['Alt', 'Control', 'Meta'].includes(event.key)) {
-      switchTo(store.tabs[store.selectedTabIndex])
+
+    if (pendingPopup) {
+      const pending = pendingPopup
+      pending.modifierWasReleased = true
+      cancelPopupShowTimeout()
+      if (pending.isModelReady) {
+        switchToSelectedTab()
+      }
+      event.preventDefault()
+      event.stopPropagation()
+      return
+    }
+
+    if (store.isOpen && !store.settings.isStayingOpen) {
+      switchToSelectedTab()
       event.preventDefault()
       event.stopPropagation()
     }
@@ -244,6 +399,17 @@ export function Popup({element}: IProps) {
 
   function onWindowBlur(event: Event): void {
     if (event.target !== window || isSettingsDemo) {
+      return
+    }
+    if (pendingPopup && document.visibilityState !== 'hidden') {
+      const pendingAtBlur = pendingPopup
+      cancelPendingBlurCheck()
+      pendingBlurTimeout = window.setTimeout(() => {
+        pendingBlurTimeout = undefined
+        if (!document.hasFocus() && (pendingPopup === pendingAtBlur || store.isOpen)) {
+          closePopup()
+        }
+      }, 50)
       return
     }
     closePopup()
