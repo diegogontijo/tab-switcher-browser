@@ -1,4 +1,11 @@
 # Popup tab switcher
+[!IMPORTANT]
+  > This repository is an independent fork of
+  > [Popup Tab Switcher](https://github.com/dvdvdmt/popup-tab-switcher),
+  >
+  > This fork is maintained by [Diego Gontijo](https://github.com/diegogontijo)
+  > and is not an official release of the original project.
+  > It includes modifications and improvements designed around features and behaviors that I found useful for my own browsing workflow.
 
 ![Popup tab switcher logo](./readme-assets/tab-switcher-logo.png)
 
