@@ -36,6 +36,11 @@ async function getSettingsFromPage(page: Page) {
     // @ts-expect-error
     (el: HTMLInputElement) => +el.value
   )
+  const popupShowDelay = await page.$eval(
+    '#popupShowDelay',
+    // @ts-expect-error
+    (el: HTMLInputElement) => +el.value
+  )
   const numberOfTabsToShow = await page.$eval(
     '#numberOfTabsToShow',
     // @ts-expect-error
@@ -64,6 +69,7 @@ async function getSettingsFromPage(page: Page) {
     textScrollDelay,
     textScrollSpeed,
     autoSwitchingTimeout,
+    popupShowDelay,
     numberOfTabsToShow,
     isDarkTheme,
     popupWidth,
@@ -82,6 +88,7 @@ const newSettings = {
     textScrollDelay: 1500,
     textScrollSpeed: 777,
     autoSwitchingTimeout: 699,
+    popupShowDelay: 250,
     numberOfTabsToShow: 5,
     isDarkTheme: true,
     popupWidth: 444,
@@ -96,6 +103,7 @@ async function setSettingsManually(page: Page) {
   await input(page, '#textScrollDelay', `${newSettings.textScrollDelay}`)
   await input(page, '#textScrollSpeed', `${newSettings.textScrollSpeed}`)
   await input(page, '#autoSwitchingTimeout', `${newSettings.autoSwitchingTimeout}`)
+  await input(page, '#popupShowDelay', `${newSettings.popupShowDelay}`)
   await input(page, '#numberOfTabsToShow', `${newSettings.numberOfTabsToShow}`)
   await page.click('#isDarkTheme')
   await input(page, '#popupWidth', `${newSettings.popupWidth}`)
@@ -123,6 +131,7 @@ describe('settings', function TestSettings() {
     const actual = await getSettingsFromPage(settingsPage)
     assert.deepStrictEqual(actual, {
       autoSwitchingTimeout: 1000,
+      popupShowDelay: 200,
       fontSize: 16,
       iconSize: 24,
       isDarkTheme: false,
@@ -145,6 +154,7 @@ describe('settings', function TestSettings() {
       settingsInPage,
       {
         autoSwitchingTimeout: 699,
+        popupShowDelay: 250,
         fontSize: 20,
         iconSize: 55,
         isDarkTheme: true,
@@ -165,6 +175,7 @@ describe('settings', function TestSettings() {
       valuesInStore,
       {
         autoSwitchingTimeout: 699,
+        popupShowDelay: 250,
         fontSize: 20,
         iconSize: 55,
         isDarkTheme: true,
@@ -186,6 +197,7 @@ describe('settings', function TestSettings() {
       settingsInPageAfterReset,
       {
         autoSwitchingTimeout: 1000,
+        popupShowDelay: 200,
         fontSize: 16,
         iconSize: 24,
         isDarkTheme: false,
@@ -268,6 +280,25 @@ describe('settings', function TestSettings() {
       )
     })
     assert(isValuesCorrect, 'values are valid')
+  })
+
+  it('stores the supported popup show delays', async () => {
+    const settingsPage = await helper.openPage('settings')
+    await settingsPage.click(selectors.resetButton)
+    const supportedDelays = [0, 100, 150, 200, 250, 500, 1000]
+    await supportedDelays.reduce(
+      (previousTest, delay) =>
+        previousTest.then(async () => {
+          await input(settingsPage, '#popupShowDelay', `${delay}`)
+          const storedSettings = await settingsPage.evaluate(() => window.e2e.getSettings())
+          assert.strictEqual(storedSettings.popupShowDelay, delay)
+        }),
+      Promise.resolve()
+    )
+
+    await input(settingsPage, '#popupShowDelay', '1001')
+    const settings = await settingsPage.evaluate(() => window.e2e.getSettings())
+    assert(settings.popupShowDelay <= 1000, 'delay is limited to 1000ms')
   })
 
   it('controls automatic switching to a previously used tab when the current one closes', async () => {
