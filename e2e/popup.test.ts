@@ -8,10 +8,44 @@ import {
   timeoutDurationMS,
   waitFor,
 } from './utils/puppeteer-utils'
-import {e2eReloadExtension, e2eSetZoom} from '../src/utils/messages'
+import {e2eReloadExtension, e2eSetZoom, setSettings} from '../src/utils/messages'
 import {contentScript} from './selectors/content-script'
 
 let helper: PuppeteerPopupHelper
+
+async function preparePopupRenderTracking(page: HelperPage) {
+  await page.waitForSelector(contentScript.root)
+  await page.evaluate(() => {
+    const popup = document.querySelector<HTMLElement>('#popup-tab-switcher')!
+    popup.dataset.e2eRenderCount = '0'
+    const observer = new MutationObserver(() => {
+      if (popup.shadowRoot?.querySelector('.overlay')) {
+        popup.dataset.e2eRenderCount = `${Number(popup.dataset.e2eRenderCount) + 1}`
+      }
+    })
+    observer.observe(popup.shadowRoot!, {childList: true, subtree: true})
+  })
+}
+
+async function getPopupRenderCount(page: HelperPage) {
+  return page.$eval(contentScript.root, (popup) =>
+    Number((popup as HTMLElement).dataset.e2eRenderCount)
+  )
+}
+
+async function initializeAndClosePopup(page: HelperPage) {
+  await helper.selectTabForward()
+  await page.keyboard.press('Escape')
+  await page.keyboard.up('Alt')
+}
+
+async function pressAndReleaseShortcut(page: HelperPage, holdDurationMs: number) {
+  await page.keyboard.down('Alt')
+  await page.keyboard.press('KeyY')
+  await waitFor(holdDurationMs)
+  await page.keyboard.up('Alt')
+  await page.evaluate(() => window.e2e.waitUntilCommandReachesTheBackgroundScript())
+}
 
 describe('popup', function TestPopup() {
   this.timeout(timeoutDurationMS)
@@ -23,6 +57,122 @@ describe('popup', function TestPopup() {
   )
 
   after(stopPuppeteer)
+
+  context('popup show delay', () => {
+    afterEach(async () => {
+      await helper.sendMessage(setSettings())
+      await closeTabs()
+      await waitFor(100)
+    })
+
+    it('switches on a quick modifier release without rendering the popup', async () => {
+      await helper.openPage('wikipedia.html')
+      await helper.openPage('example.html')
+      const sourcePage = await helper.openPage('stackoverflow.html')
+      await initializeAndClosePopup(sourcePage)
+      await preparePopupRenderTracking(sourcePage)
+
+      await pressAndReleaseShortcut(sourcePage, 80)
+
+      const activePage = await helper.getActivePage()
+      assert.strictEqual(await activePage.title(), 'Example', 'switches to the previous tab')
+      await waitFor(defaultSettings.popupShowDelay + 50)
+      assert.strictEqual(await getPopupRenderCount(sourcePage), 0, 'popup was never rendered')
+    })
+
+    it('opens after the delay and keeps traversing tabs normally', async () => {
+      await helper.openPage('wikipedia.html')
+      await helper.openPage('example.html')
+      const sourcePage = await helper.openPage('stackoverflow.html')
+
+      await helper.selectTabForward()
+      assert.strictEqual(await sourcePage.queryPopup('.overlay', (elements) => elements.length), 1)
+      assert.strictEqual(
+        await sourcePage.queryPopup('.tab_selected', ([tab]) => tab.textContent),
+        'Example'
+      )
+      await helper.selectTabForward()
+      assert.strictEqual(
+        await sourcePage.queryPopup('.tab_selected', ([tab]) => tab.textContent),
+        'Wikipedia'
+      )
+      await sourcePage.keyboard.up('Alt')
+      await waitFor(100)
+
+      assert.strictEqual(await (await helper.getActivePage()).title(), 'Wikipedia')
+    })
+
+    it('cancels the timer when the modifier is released just before it expires', async () => {
+      await helper.openPage('wikipedia.html')
+      await helper.openPage('example.html')
+      const sourcePage = await helper.openPage('stackoverflow.html')
+      await helper.sendMessage(setSettings({popupShowDelay: 500}))
+      await initializeAndClosePopup(sourcePage)
+      await preparePopupRenderTracking(sourcePage)
+
+      await pressAndReleaseShortcut(sourcePage, 350)
+      await waitFor(200)
+
+      assert.strictEqual(await getPopupRenderCount(sourcePage), 0, 'popup did not open later')
+      assert.strictEqual(await (await helper.getActivePage()).title(), 'Example')
+    })
+
+    it('does not leave delayed popups after repeated quick shortcuts', async () => {
+      const firstPage = await helper.openPage('wikipedia.html')
+      const secondPage = await helper.openPage('example.html')
+      await initializeAndClosePopup(secondPage)
+      await firstPage.bringToFront()
+      await initializeAndClosePopup(firstPage)
+      await preparePopupRenderTracking(firstPage)
+      await preparePopupRenderTracking(secondPage)
+
+      for (let i = 0; i < 4; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        const activePage = await helper.getActivePage()
+        // eslint-disable-next-line no-await-in-loop
+        await pressAndReleaseShortcut(activePage, 30)
+      }
+      await waitFor(defaultSettings.popupShowDelay + 50)
+
+      assert.strictEqual(await getPopupRenderCount(firstPage), 0)
+      assert.strictEqual(await getPopupRenderCount(secondPage), 0)
+    })
+
+    it('opens immediately when the configured delay is zero', async () => {
+      await helper.openPage('wikipedia.html')
+      const sourcePage = await helper.openPage('example.html')
+      await helper.sendMessage(setSettings({popupShowDelay: 0}))
+
+      await helper.selectTabForward()
+
+      assert.strictEqual(await sourcePage.queryPopup('.overlay', (elements) => elements.length), 1)
+      await helper.switchToSelectedTab()
+    })
+
+    it('cancels a pending popup when the active tab changes or closes', async () => {
+      const firstPage = await helper.openPage('wikipedia.html')
+      const sourcePage = await helper.openPage('example.html')
+      await helper.sendMessage(setSettings({popupShowDelay: 500}))
+      await initializeAndClosePopup(sourcePage)
+      await preparePopupRenderTracking(sourcePage)
+
+      await sourcePage.keyboard.down('Alt')
+      await sourcePage.keyboard.press('KeyY')
+      await waitFor(50)
+      await firstPage.bringToFront()
+      await firstPage.keyboard.up('Alt')
+      await waitFor(550)
+      assert.strictEqual(await getPopupRenderCount(sourcePage), 0, 'blur cancels the popup')
+
+      await sourcePage.bringToFront()
+      await sourcePage.keyboard.down('Alt')
+      await sourcePage.keyboard.press('KeyY')
+      await waitFor(50)
+      await sourcePage.close()
+      await waitFor(550)
+      assert.strictEqual(await (await helper.getActivePage()).title(), 'Wikipedia')
+    })
+  })
 
   context('one page', () => {
     after(closeTabs)
